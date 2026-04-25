@@ -1,6 +1,7 @@
 import streamlit as st
 import networkx as nx
 import random
+import math
 
 
 # Graph Initialization
@@ -8,57 +9,123 @@ def create_graph(size):
 
     G = nx.Graph()
 
-    num_nodes = size
+    # Config
+    num_clusters = 4  # city districts
+    nodes_per_cluster = size // num_clusters
 
-    num_normal = int(0.5 * num_nodes)
-    num_refugee = int(0.3 * num_nodes)
-    num_camp = num_nodes - num_normal - num_refugee
+    all_nodes = []
+    cluster_nodes = {}
 
-    nodes = []
+    grid_side = int(math.sqrt(num_clusters)) + 1
 
-    # Create Nodes
-    for i in range(num_normal):
-        name = f"N{i}"
-        G.add_node(name, type="normal")
-        nodes.append(name)
+    cluster_centers = {}
 
-    for i in range(num_refugee):
-        name = f"R{i}"
-        G.add_node(name, type="refugee")
-        nodes.append(name)
+    for c in range(num_clusters):
+        gx = c % grid_side
+        gy = c // grid_side
 
-    for i in range(num_camp):
-        name = f"C{i}"
-        G.add_node(name, type="camp")
-        nodes.append(name)
-
-    # Create Random Edges
-    for _ in range(size * 3):
-
-        u = random.choice(nodes)
-        v = random.choice(nodes)
-
-        if u == v:
-            continue
-
-        weight = random.randint(2, 10)
-        risk = random.randint(1, 5)
-
-        G.add_edge(
-            u,
-            v,
-            base_time=weight,
-            risk=risk,
-            state="intact",
-            weight=weight
+        cluster_centers[c] = (
+            gx * random.uniform(-5, 5),
+            gy * random.uniform(-5, 5)
         )
 
-    # Force Connectivity
-    for n in nodes:
+    # Create Neighborhood Clusters
+    node_id = 0
+
+    for c in range(num_clusters):
+
+        cluster_nodes[c] = []
+
+        # Local grid size inside cluster
+        side = int(math.sqrt(nodes_per_cluster)) + 1
+
+        for i in range(side):
+            for j in range(side):
+
+                if len(cluster_nodes[c]) >= nodes_per_cluster:
+                    break
+
+                name = f"N{node_id}"
+                node_id += 1
+
+                cx, cy = cluster_centers[c]
+
+                pos = (
+                    cx + i * 0.8 + random.uniform(-0.6, 0.6),
+                    cy + j * 0.8 + random.uniform(-0.6, 0.6)
+                )
+
+                G.add_node(
+                    name,
+                    type="normal",
+                    cluster=c,
+                    pos=pos
+                )
+
+                cluster_nodes[c].append(name)
+                all_nodes.append(name)
+
+    # Add Refugees
+    num_refugee = int(0.3 * size)
+    refugees = random.sample(all_nodes, num_refugee)
+
+    for r in refugees:
+        G.nodes[r]["type"] = "refugee"
+
+    # Add Camps
+    num_camp = max(2, int(0.2 * size))
+
+    outer_nodes = [
+        n for n in all_nodes
+        if G.nodes[n]["cluster"] in [0, num_clusters - 1]
+    ]
+
+    camps = random.sample(outer_nodes, min(num_camp, len(outer_nodes)))
+
+    for c in camps:
+        G.nodes[c]["type"] = "camp"
+
+    # Local Edges
+    for c in cluster_nodes:
+
+        nodes = cluster_nodes[c]
+
+        for _ in range(len(nodes) * 2):
+
+            u, v = random.sample(nodes, 2)
+
+            if not G.has_edge(u, v):
+
+                G.add_edge(
+                    u,
+                    v,
+                    base_time=random.randint(2, 6),
+                    risk=random.randint(1, 3),
+                    state="intact",
+                    weight=random.randint(2, 6)
+                )
+
+    # Highway Edges Between Clusters
+    for _ in range(size // 2):
+
+        u, v = random.sample(all_nodes, 2)
+
+        if G.nodes[u]["cluster"] != G.nodes[v]["cluster"]:
+
+            G.add_edge(
+                u,
+                v,
+                base_time=random.randint(5, 12),
+                risk=random.randint(2, 5),
+                state="intact",
+                weight=random.randint(5, 12)
+            )
+
+    # Guarantee Connectivity
+    for n in all_nodes:
         if G.degree(n) == 0:
 
-            # Connect Isolated Nodes
-            target = random.choice([x for x in nodes if x != n])
+            target = random.choice([x for x in all_nodes if x != n])
 
             G.add_edge(
                 n,
@@ -200,7 +267,10 @@ def draw_interactive_graph(G, route=None, start=None):
     net = Network(height="650px", width="100%", bgcolor="white")
 
     # Use Persistent Positions
-    pos = st.session_state.positions
+    pos = {
+        n: G.nodes[n]["pos"]
+        for n in G.nodes
+    }
 
     route_edges = set(zip(route, route[1:])) if route else set()
 
@@ -228,8 +298,8 @@ def draw_interactive_graph(G, route=None, start=None):
             label="",
             color=color,
             size=size,
-            x=float(x) * 300,
-            y=float(y) * 300,
+            x=float(x) * 100,
+            y=float(y) * 100,
             physics=False,
             title=f"{n} ({data['type']})"
         )
@@ -308,14 +378,6 @@ def main():
 
         st.session_state.graph = G
         st.session_state.graph_size = map_size
-
-        # IMPORTANT: compute positions AFTER graph exists
-        st.session_state.positions = nx.spring_layout(
-            G,
-            seed=42,
-            k=0.5,
-            iterations=50
-        )
 
     if st.session_state.graph is None:
         st.stop()
