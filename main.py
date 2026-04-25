@@ -1,56 +1,73 @@
 import streamlit as st
 import networkx as nx
-import itertools
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from io import BytesIO
-import base64
-import math
+import random
 
 
 # Graph Initialization
-def create_graph():
+def create_graph(size):
 
     G = nx.Graph()
 
-    # Node types
-    normal_nodes = ["A", "B", "C", "D", "E"]
-    refugee_nodes = ["R1", "R2", "R3"]
-    camp_nodes = ["C1", "C2"]
+    num_nodes = size
 
-    for n in normal_nodes:
-        G.add_node(n, type="normal")
+    num_normal = int(0.5 * num_nodes)
+    num_refugee = int(0.3 * num_nodes)
+    num_camp = num_nodes - num_normal - num_refugee
 
-    for r in refugee_nodes:
-        G.add_node(r, type="refugee")
+    nodes = []
 
-    for c in camp_nodes:
-        G.add_node(c, type="camp")
+    # Create Nodes
+    for i in range(num_normal):
+        name = f"N{i}"
+        G.add_node(name, type="normal")
+        nodes.append(name)
 
-    edges = [
-        ("A", "B", 5),
-        ("A", "C", 4),
-        ("B", "D", 6),
-        ("C", "D", 3),
-        ("C", "E", 6),
-        ("D", "R1", 4),
-        ("E", "R2", 5),
-        ("B", "R3", 7),
-        ("R1", "C1", 6),
-        ("R2", "C1", 5),
-        ("R3", "C2", 4),
-        ("D", "C2", 8)
-    ]
+    for i in range(num_refugee):
+        name = f"R{i}"
+        G.add_node(name, type="refugee")
+        nodes.append(name)
 
-    for u, v, w in edges:
+    for i in range(num_camp):
+        name = f"C{i}"
+        G.add_node(name, type="camp")
+        nodes.append(name)
+
+    # Create Random Edges
+    for _ in range(size * 3):
+
+        u = random.choice(nodes)
+        v = random.choice(nodes)
+
+        if u == v:
+            continue
+
+        weight = random.randint(2, 10)
+        risk = random.randint(1, 5)
+
         G.add_edge(
             u,
             v,
-            base_time=w,
-            risk=1,
+            base_time=weight,
+            risk=risk,
             state="intact",
-            weight=w
+            weight=weight
         )
+
+    # Force Connectivity
+    for n in nodes:
+        if G.degree(n) == 0:
+
+            # Connect Isolated Nodes
+            target = random.choice([x for x in nodes if x != n])
+
+            G.add_edge(
+                n,
+                target,
+                base_time=random.randint(2, 10),
+                risk=random.randint(1, 5),
+                state="intact",
+                weight=random.randint(2, 10)
+            )
 
     return G
 
@@ -102,42 +119,60 @@ def compute_distance_matrix(G, nodes):
 # Refugee Evacuation Optimizer
 def solve_refugee_order(start, refugees, camps, dist_matrix):
 
+    # Step 1 - Greedy Nearest Neighbor
+    unvisited = set(refugees)
+    current = start
+    route = []
+
+    while unvisited:
+        nearest = None
+        best_dist = float("inf")
+
+        for r in unvisited:
+            if r in dist_matrix[current]:
+                d = dist_matrix[current][r]
+                if d < best_dist:
+                    best_dist = d
+                    nearest = r
+
+        if nearest is None:
+            return None, None, float("inf")
+
+        route.append(nearest)
+        unvisited.remove(nearest)
+        current = nearest
+
+    # Step 2 - 2-opt Optimization
+    def route_cost(route):
+        cost = dist_matrix[start][route[0]]
+        for i in range(len(route) - 1):
+            cost += dist_matrix[route[i]][route[i + 1]]
+        return cost
+
+    improved = True
+    while improved:
+        improved = False
+        for i in range(len(route)):
+            for j in range(i + 1, len(route)):
+                new_route = route[:i] + route[i:j+1][::-1] + route[j+1:]
+                if route_cost(new_route) < route_cost(route):
+                    route = new_route
+                    improved = True
+
+    # Step 3 - Choose Best Camp
     best_cost = float("inf")
-    best_route = None
     best_camp = None
 
-    for perm in itertools.permutations(refugees):
+    last = route[-1]
 
-        if perm[0] not in dist_matrix[start]:
-            continue
-
-        cost = dist_matrix[start][perm[0]]
-        valid = True
-
-        for i in range(len(perm) - 1):
-            if perm[i + 1] not in dist_matrix[perm[i]]:
-                valid = False
-                break
-
-            cost += dist_matrix[perm[i]][perm[i + 1]]
-
-        if not valid:
-            continue
-
-        last = perm[-1]
-
-        for camp in camps:
-            if camp not in dist_matrix[last]:
-                continue
-
-            total = cost + dist_matrix[last][camp]
-
+    for camp in camps:
+        if camp in dist_matrix[last]:
+            total = route_cost(route) + dist_matrix[last][camp]
             if total < best_cost:
                 best_cost = total
-                best_route = perm
                 best_camp = camp
 
-    return best_route, best_camp, best_cost
+    return route, best_camp, best_cost
 
 
 # Path Reconstruction
@@ -158,222 +193,88 @@ def reconstruct_path(G, start, route, camp):
 
 
 # Graph Visualization
-def draw_graph(G, route=None, start=None):
+def draw_interactive_graph(G, route=None, start=None):
 
-    pos = {
-        "A": (5.0, 0.8),
-        "B": (3.5, 0.8),
-        "C": (5.8, 2.4),
-        "D": (3.7, 2.4),
-        "E": (7.2, 3.6),
-        "R1": (3.8, 4.6),
-        "R2": (8.2, 4.6),
-        "R3": (2.1, 0.5),
-        "C1": (6.1, 5.4),
-        "C2": (2.4, 1.7)
-    }
+    from pyvis.network import Network
 
-    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=120)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
+    net = Network(height="650px", width="100%", bgcolor="white")
 
-    # Draw edges based on road damage state
-    edge_style_map = {
-        "intact": {"color": "gray", "width": 2, "style": "solid", "alpha": 0.8},
-        "light": {"color": "orange", "width": 3, "style": "solid", "alpha": 0.9},
-        "heavy": {"color": "red", "width": 4, "style": "solid", "alpha": 0.9},
-        "blocked": {"color": "darkred", "width": 3, "style": "dashed", "alpha": 0.5},
-    }
+    # Use Persistent Positions
+    pos = st.session_state.positions
 
-    for state, style in edge_style_map.items():
-        state_edges = [
-            (u, v)
-            for u, v, data in G.edges(data=True)
-            if data["state"] == state
-        ]
+    route_edges = set(zip(route, route[1:])) if route else set()
 
-        nx.draw_networkx_edges(
-            G,
-            pos,
-            edgelist=state_edges,
-            edge_color=style["color"],
-            width=style["width"],
-            style=style["style"],
-            alpha=style["alpha"],
-            ax=ax
+    # Nodes
+    for n, data in G.nodes(data=True):
+
+        color = "gray"
+        size = 6
+
+        if data["type"] == "refugee":
+            color = "red"
+            size = 8
+        elif data["type"] == "camp":
+            color = "green"
+
+        if start == n:
+            color = "gold"
+            size = 10
+
+        # Fixed Position
+        x, y = pos[n]
+
+        net.add_node(
+            n,
+            label="",
+            color=color,
+            size=size,
+            x=float(x) * 300,
+            y=float(y) * 300,
+            physics=False,
+            title=f"{n} ({data['type']})"
         )
 
-    # Highlight optimal route if it exists
-    if route:
-        route_edges = list(zip(route, route[1:]))
-
-        nx.draw_networkx_edges(
-            G,
-            pos,
-            edgelist=route_edges,
-            edge_color="blue",
-            width=5,
-            ax=ax
-        )
-
-    # Node groups
-    normal_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "normal"]
-    refugee_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "refugee"]
-    camp_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "camp"]
-
-    # Draw nodes
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=normal_nodes,
-        node_color="gray",
-        node_size=700,
-        ax=ax
-    )
-
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=refugee_nodes,
-        node_color="red",
-        node_size=700,
-        ax=ax
-    )
-
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        nodelist=camp_nodes,
-        node_color="green",
-        node_size=700,
-        ax=ax
-    )
-
-    # Highlight start node
-    if start:
-        nx.draw_networkx_nodes(
-            G,
-            pos,
-            nodelist=[start],
-            node_color="gold",
-            node_size=850,
-            edgecolors="black",
-            linewidths=2,
-            ax=ax
-        )
-
-    # Node labels
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        font_size=9,
-        font_weight="bold",
-        ax=ax
-    )
-
-    # Edge labels placed next to each road and rotated parallel to the line
+    # Edges
     for u, v, data in G.edges(data=True):
-        x1, y1 = pos[u]
-        x2, y2 = pos[v]
 
-        # Midpoint of the edge
-        mx = (x1 + x2) / 2
-        my = (y1 + y2) / 2
+        color = "gray"
+        width = 2
 
-        # Direction vector of the edge
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx**2 + dy**2)
+        if data["state"] == "light":
+            color = "orange"
+        elif data["state"] == "heavy":
+            color = "red"
+        elif data["state"] == "blocked":
+            color = "darkred"
 
-        if length == 0:
-            continue
+        # Highlight Optimal Route
+        if route and ((u, v) in route_edges or (v, u) in route_edges):
+            color = "blue"
+            width = 5
 
-        # Offset perpendicular to the line so the text sits beside the line
-        offset = 0.18
-        ox = -dy / length * offset
-        oy = dx / length * offset
-
-        # Compute line angle
-        angle = math.degrees(math.atan2(dy, dx))
-
-        # Keep text upright
-        if angle > 90:
-            angle -= 180
-        elif angle < -90:
-            angle += 180
-
-        label = f"T:{data['base_time']} | R:{data['risk']}"
-
-        ax.text(
-            mx + ox,
-            my + oy,
-            label,
-            fontsize=7,
-            ha="center",
-            va="center",
-            rotation=angle,
-            rotation_mode="anchor",
-            color="black",
-            bbox=dict(
-                facecolor="white",
-                edgecolor="none",
-                alpha=0.8,
-                pad=0.2
-            )
+        net.add_edge(
+            u, v,
+            color=color,
+            width=width,
+            title=f"Time: {data['base_time']}\nRisk: {data['risk']}\nState: {data['state']}"
         )
 
-    # Legend
-    legend_items = [
-        Line2D([0], [0], marker="o", color="w", label="Normal Node",
-               markerfacecolor="gray", markersize=8),
-        Line2D([0], [0], marker="o", color="w", label="Refugee Node",
-               markerfacecolor="red", markersize=8),
-        Line2D([0], [0], marker="o", color="w", label="Camp Node",
-               markerfacecolor="green", markersize=8),
-        Line2D([0], [0], marker="o", color="w", label="Start Node",
-               markerfacecolor="gold", markeredgecolor="black", markersize=8),
-        Line2D([0], [0], color="gray", lw=2, label="Intact Road"),
-        Line2D([0], [0], color="orange", lw=3, label="Light Damage"),
-        Line2D([0], [0], color="red", lw=4, label="Heavy Damage"),
-        Line2D([0], [0], color="darkred", lw=3, linestyle="dashed", label="Blocked Road"),
-        Line2D([0], [0], color="blue", lw=4, label="Optimal Route")
-    ]
+    net.toggle_physics(False)
 
-    ax.legend(
-        handles=legend_items,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1),
-        borderaxespad=0.0,
-        fontsize=8
-    )
-
-    ax.set_title("Evacuation Map", fontsize=14)
-    ax.axis("off")
-    plt.tight_layout()
-
-    # Save image to buffer
-    buffer = BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight", dpi=120)
-    buffer.seek(0)
-
-    # Center the map image using HTML
-    image_base64 = base64.b64encode(buffer.getvalue()).decode()
-
-    st.markdown(
-        f"""
-        <div style="display: flex; justify-content: center; align-items: center; width: 100%;">
-            <img src="data:image/png;base64,{image_base64}"
-                 style="width: 650px; max-width: 100%; border-radius: 6px;">
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    plt.close(fig)
+    st.components.v1.html(net.generate_html(), height=650)
 
 
 # Streamlit App
 def main():
+
+    if "graph" not in st.session_state:
+        st.session_state.graph = None
+
+    if "graph_size" not in st.session_state:
+        st.session_state.graph_size = None
+
+    if "positions" not in st.session_state:
+        st.session_state.positions = None
 
     st.set_page_config(
         page_title="Evacuation Route Optimizer",
@@ -386,8 +287,38 @@ def main():
         unsafe_allow_html=True
     )
 
-    if "graph" not in st.session_state:
-        st.session_state.graph = create_graph()
+    st.subheader("Map Selection")
+
+    map_size = st.selectbox(
+        "Choose map size",
+        ["Small (75 nodes)", "Medium (150 nodes)", "Large (250 nodes)"]
+    )
+
+    size_map = {
+        "Small (75 nodes)": 75,
+        "Medium (150 nodes)": 150,
+        "Large (250 nodes)": 250
+    }
+
+    if (
+            st.session_state.graph is None
+            or st.session_state.graph_size != map_size
+    ):
+        G = create_graph(size_map[map_size])
+
+        st.session_state.graph = G
+        st.session_state.graph_size = map_size
+
+        # IMPORTANT: compute positions AFTER graph exists
+        st.session_state.positions = nx.spring_layout(
+            G,
+            seed=42,
+            k=0.5,
+            iterations=50
+        )
+
+    if st.session_state.graph is None:
+        st.stop()
 
     G = st.session_state.graph
 
@@ -407,21 +338,21 @@ def main():
         alpha = st.slider("Speed priority vs. safety", 0.0, 1.0, 0.5)
 
     # Road damage controls
-    st.subheader("Road Damage Control")
+    with st.expander("Road Damage Control", expanded=False):
 
-    edges = list(G.edges())
-    road_col1, road_col2 = st.columns(2)
+        edges = list(G.edges())
+        road_col1, road_col2 = st.columns(2)
 
-    for index, (u, v) in enumerate(edges):
-        target_col = road_col1 if index % 2 == 0 else road_col2
+        for index, (u, v) in enumerate(edges):
+            target_col = road_col1 if index % 2 == 0 else road_col2
 
-        with target_col:
-            state = st.selectbox(
-                f"{u}-{v}",
-                ["intact", "light", "heavy", "blocked"],
-                key=f"{u}-{v}"
-            )
-            G[u][v]["state"] = state
+            with target_col:
+                state = st.selectbox(
+                    f"{u}-{v}",
+                    ["intact", "light", "heavy", "blocked"],
+                    key=f"{u}-{v}"
+                )
+                G[u][v]["state"] = state
 
     update_edge_weights(G, alpha)
 
@@ -451,7 +382,7 @@ def main():
 
             if route is None or camp is None:
                 st.error("No valid route found with the current road settings.")
-                draw_graph(G, start=start)
+                draw_interactive_graph(G, start=start)
 
             else:
                 path = reconstruct_path(G, start, route, camp)
@@ -479,14 +410,14 @@ def main():
                     unsafe_allow_html=True
                 )
 
-                draw_graph(G, path, start=start)
+                draw_interactive_graph(G, path, start=start)
 
         except Exception:
             st.error("No feasible evacuation route exists under the current road settings.")
-            draw_graph(G, start=start)
+            draw_interactive_graph(G, start=start)
 
     else:
-        draw_graph(G, start=start)
+        draw_interactive_graph(G, start=start)
 
 
 if __name__ == "__main__":
