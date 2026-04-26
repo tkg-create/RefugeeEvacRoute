@@ -10,14 +10,12 @@ def create_graph(size):
     G = nx.Graph()
 
     # Config
-    num_clusters = 4  # city districts
-    nodes_per_cluster = size // num_clusters
+    num_clusters = 4
 
     all_nodes = []
     cluster_nodes = {}
 
     grid_side = int(math.sqrt(num_clusters)) + 1
-
     cluster_centers = {}
 
     for c in range(num_clusters):
@@ -25,24 +23,30 @@ def create_graph(size):
         gy = c // grid_side
 
         cluster_centers[c] = (
-            gx * random.uniform(-5, 5),
-            gy * random.uniform(-5, 5)
+            gx * random.uniform(4, 6),
+            gy * random.uniform(4, 6)
         )
 
-    # Create Neighborhood Clusters
+    # Distribute nodes across clusters so demo mode can use exactly 15 nodes
+    base_nodes_per_cluster = size // num_clusters
+    extra_nodes = size % num_clusters
+
     node_id = 0
 
     for c in range(num_clusters):
 
         cluster_nodes[c] = []
 
-        # Local grid size inside cluster
-        side = int(math.sqrt(nodes_per_cluster)) + 1
+        target_count = base_nodes_per_cluster
+        if c < extra_nodes:
+            target_count += 1
+
+        side = int(math.sqrt(target_count)) + 1
 
         for i in range(side):
             for j in range(side):
 
-                if len(cluster_nodes[c]) >= nodes_per_cluster:
+                if len(cluster_nodes[c]) >= target_count:
                     break
 
                 name = f"N{node_id}"
@@ -51,8 +55,8 @@ def create_graph(size):
                 cx, cy = cluster_centers[c]
 
                 pos = (
-                    cx + i * 0.8 + random.uniform(-0.6, 0.6),
-                    cy + j * 0.8 + random.uniform(-0.6, 0.6)
+                    cx + i * 0.8 + random.uniform(-0.35, 0.35),
+                    cy + j * 0.8 + random.uniform(-0.35, 0.35)
                 )
 
                 G.add_node(
@@ -65,20 +69,30 @@ def create_graph(size):
                 cluster_nodes[c].append(name)
                 all_nodes.append(name)
 
+            if len(cluster_nodes[c]) >= target_count:
+                break
+
     # Add Refugees
-    num_refugee = int(0.3 * size)
-    refugees = random.sample(all_nodes, num_refugee)
+    num_refugee = max(2, int(0.25 * size))
+    refugees = random.sample(all_nodes, min(num_refugee, len(all_nodes)))
 
     for r in refugees:
         G.nodes[r]["type"] = "refugee"
 
     # Add Camps
-    num_camp = max(2, int(0.2 * size))
+    num_camp = max(2, int(0.15 * size))
 
     outer_nodes = [
         n for n in all_nodes
         if G.nodes[n]["cluster"] in [0, num_clusters - 1]
+        and G.nodes[n]["type"] != "refugee"
     ]
+
+    if len(outer_nodes) < num_camp:
+        outer_nodes = [
+            n for n in all_nodes
+            if G.nodes[n]["type"] != "refugee"
+        ]
 
     camps = random.sample(outer_nodes, min(num_camp, len(outer_nodes)))
 
@@ -92,48 +106,77 @@ def create_graph(size):
 
         for _ in range(len(nodes) * 2):
 
+            if len(nodes) < 2:
+                continue
+
             u, v = random.sample(nodes, 2)
 
             if not G.has_edge(u, v):
 
+                base_time = random.randint(2, 6)
+
                 G.add_edge(
                     u,
                     v,
-                    base_time=random.randint(2, 6),
+                    base_time=base_time,
                     risk=random.randint(1, 3),
                     state="intact",
-                    weight=random.randint(2, 6)
+                    weight=base_time
                 )
 
     # Highway Edges Between Clusters
-    for _ in range(size // 2):
+    for _ in range(max(4, size // 2)):
 
         u, v = random.sample(all_nodes, 2)
 
         if G.nodes[u]["cluster"] != G.nodes[v]["cluster"]:
 
-            G.add_edge(
-                u,
-                v,
-                base_time=random.randint(5, 12),
-                risk=random.randint(2, 5),
-                state="intact",
-                weight=random.randint(5, 12)
-            )
+            if not G.has_edge(u, v):
 
-    # Guarantee Connectivity
+                base_time = random.randint(5, 12)
+
+                G.add_edge(
+                    u,
+                    v,
+                    base_time=base_time,
+                    risk=random.randint(2, 5),
+                    state="intact",
+                    weight=base_time
+                )
+
+    # Ensure each node has at least one connection
     for n in all_nodes:
         if G.degree(n) == 0:
 
             target = random.choice([x for x in all_nodes if x != n])
+            base_time = random.randint(2, 10)
 
             G.add_edge(
                 n,
                 target,
-                base_time=random.randint(2, 10),
+                base_time=base_time,
                 risk=random.randint(1, 5),
                 state="intact",
-                weight=random.randint(2, 10)
+                weight=base_time
+            )
+
+    # Ensure clusters are connected to each other
+    for c in range(num_clusters - 1):
+
+        u = random.choice(cluster_nodes[c])
+        v = random.choice(cluster_nodes[c + 1])
+
+        if not G.has_edge(u, v):
+
+            base_time = random.randint(5, 12)
+
+            G.add_edge(
+                u,
+                v,
+                base_time=base_time,
+                risk=random.randint(2, 5),
+                state="intact",
+                weight=base_time
             )
 
     return G
@@ -210,18 +253,35 @@ def solve_refugee_order(start, refugees, camps, dist_matrix):
         current = nearest
 
     # Step 2 - 2-opt Optimization
-    def route_cost(route):
-        cost = dist_matrix[start][route[0]]
-        for i in range(len(route) - 1):
-            cost += dist_matrix[route[i]][route[i + 1]]
+    def route_cost(candidate_route):
+
+        if not candidate_route:
+            return 0
+
+        if candidate_route[0] not in dist_matrix[start]:
+            return float("inf")
+
+        cost = dist_matrix[start][candidate_route[0]]
+
+        for i in range(len(candidate_route) - 1):
+
+            if candidate_route[i + 1] not in dist_matrix[candidate_route[i]]:
+                return float("inf")
+
+            cost += dist_matrix[candidate_route[i]][candidate_route[i + 1]]
+
         return cost
 
     improved = True
+
     while improved:
         improved = False
+
         for i in range(len(route)):
             for j in range(i + 1, len(route)):
-                new_route = route[:i] + route[i:j+1][::-1] + route[j+1:]
+
+                new_route = route[:i] + route[i:j + 1][::-1] + route[j + 1:]
+
                 if route_cost(new_route) < route_cost(route):
                     route = new_route
                     improved = True
@@ -235,6 +295,7 @@ def solve_refugee_order(start, refugees, camps, dist_matrix):
     for camp in camps:
         if camp in dist_matrix[last]:
             total = route_cost(route) + dist_matrix[last][camp]
+
             if total < best_cost:
                 best_cost = total
                 best_camp = camp
@@ -266,7 +327,6 @@ def draw_interactive_graph(G, route=None, start=None):
 
     net = Network(height="650px", width="100%", bgcolor="white")
 
-    # Use Persistent Positions
     pos = {
         n: G.nodes[n]["pos"]
         for n in G.nodes
@@ -283,19 +343,20 @@ def draw_interactive_graph(G, route=None, start=None):
         if data["type"] == "refugee":
             color = "red"
             size = 8
+
         elif data["type"] == "camp":
             color = "green"
+            size = 8
 
         if start == n:
             color = "gold"
             size = 10
 
-        # Fixed Position
         x, y = pos[n]
 
         net.add_node(
             n,
-            label="",
+            label=n if len(G.nodes) <= 20 else "",
             color=color,
             size=size,
             x=float(x) * 100,
@@ -309,23 +370,29 @@ def draw_interactive_graph(G, route=None, start=None):
 
         color = "gray"
         width = 2
+        dashes = False
 
         if data["state"] == "light":
             color = "orange"
+
         elif data["state"] == "heavy":
             color = "red"
+
         elif data["state"] == "blocked":
             color = "darkred"
+            dashes = True
 
-        # Highlight Optimal Route
         if route and ((u, v) in route_edges or (v, u) in route_edges):
             color = "blue"
             width = 5
+            dashes = False
 
         net.add_edge(
-            u, v,
+            u,
+            v,
             color=color,
             width=width,
+            dashes=dashes,
             title=f"Time: {data['base_time']}\nRisk: {data['risk']}\nState: {data['state']}"
         )
 
@@ -343,9 +410,6 @@ def main():
     if "graph_size" not in st.session_state:
         st.session_state.graph_size = None
 
-    if "positions" not in st.session_state:
-        st.session_state.positions = None
-
     st.set_page_config(
         page_title="Evacuation Route Optimizer",
         page_icon="🗺️",
@@ -361,18 +425,24 @@ def main():
 
     map_size = st.selectbox(
         "Choose map size",
-        ["Small (75 nodes)", "Medium (150 nodes)", "Large (250 nodes)"]
+        [
+            "Demo Mode (15 nodes)",
+            "Small (75 nodes)",
+            "Medium (150 nodes)",
+            "Large (250 nodes)"
+        ]
     )
 
     size_map = {
+        "Demo Mode (15 nodes)": 15,
         "Small (75 nodes)": 75,
         "Medium (150 nodes)": 150,
         "Large (250 nodes)": 250
     }
 
     if (
-            st.session_state.graph is None
-            or st.session_state.graph_size != map_size
+        st.session_state.graph is None
+        or st.session_state.graph_size != map_size
     ):
         G = create_graph(size_map[map_size])
 
@@ -402,18 +472,53 @@ def main():
     # Road damage controls
     with st.expander("Road Damage Control", expanded=False):
 
+        st.caption(
+            "Use the buttons below to set each road condition. "
+            "Blocked roads are removed from possible routes."
+        )
+
+        damage_options = ["intact", "light", "heavy", "blocked"]
+
+        display_names = {
+            "intact": "Intact",
+            "light": "Light",
+            "heavy": "Heavy",
+            "blocked": "Blocked"
+        }
+
+        st.markdown(
+            """
+            <div style='font-size: 14px; margin-bottom: 10px;'>
+                <b>Road condition key:</b>
+                Intact = normal road,
+                Light = moderately damaged,
+                Heavy = severely damaged,
+                Blocked = unusable
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
         edges = list(G.edges())
         road_col1, road_col2 = st.columns(2)
 
         for index, (u, v) in enumerate(edges):
+
             target_col = road_col1 if index % 2 == 0 else road_col2
 
             with target_col:
-                state = st.selectbox(
+                current_state = G[u][v].get("state", "intact")
+                current_index = damage_options.index(current_state)
+
+                state = st.radio(
                     f"{u}-{v}",
-                    ["intact", "light", "heavy", "blocked"],
-                    key=f"{u}-{v}"
+                    damage_options,
+                    index=current_index,
+                    format_func=lambda option: display_names[option],
+                    horizontal=True,
+                    key=f"road_state_{st.session_state.graph_size}_{u}_{v}"
                 )
+
                 G[u][v]["state"] = state
 
     update_edge_weights(G, alpha)
